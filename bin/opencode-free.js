@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+import { runCli } from "../src/cli.js"
+
+try {
+  process.exitCode = await runCli()
+} catch (error) {
+  console.error(error instanceof Error ? error.stack || error.message : String(error))
+  process.exitCode = 1
+}

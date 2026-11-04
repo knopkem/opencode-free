@@ -1,0 +1,32 @@
+{
+  "name": "opencode-free",
+  "version": "0.1.0",
+  "description": "Automatic routing, failover, and benchmarking for OpenCode free models",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "opencode-free": "./bin/opencode-free.js"
+  },
+  "exports": {
+    ".": "./src/plugin.js",
+    "./router": "./src/router.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/*.js && node --check bin/opencode-free.js",
+    "benchmark": "node ./bin/opencode-free.js benchmark"
+  },
+  "dependencies": {
+    "@opencode/client": "2.2.5",
+    "@opencode/plugin": "2.2.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

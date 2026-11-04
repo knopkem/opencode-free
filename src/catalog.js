@@ -124,6 +124,8 @@ export function normalizeModel(model) {
 
 export function catalogFromModels(models, settings, now = new Date()) {
   const providers = new Set(settings.providers)
+  const allProviders = providers.has("*")
+  const excludedProviders = new Set(settings.excludeProviders)
   const excluded = new Set(settings.excludeModels)
   const normalized = []
   const seen = new Set()
@@ -133,7 +135,8 @@ export function catalogFromModels(models, settings, now = new Date()) {
     const key = baseKey(model)
     if (seen.has(key)) continue
     seen.add(key)
-    if (!providers.has(model.providerID)) continue
+    if (excludedProviders.has(model.providerID)) continue
+    if (!allProviders && !providers.has(model.providerID)) continue
     if (!model.enabled) continue
     if (model.type !== "chat") continue
     if (!model.capabilities.tools) continue

@@ -5,7 +5,8 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "opencode-free": "./bin/opencode-free.js"
+    "opencode-free": "./bin/opencode-free.js",
+    "ocf": "./bin/ocf.js"
   },
   "exports": {
     ".": "./src/plugin.js",
@@ -19,8 +20,8 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check src/*.js && node --check bin/opencode-free.js",
-    "benchmark": "node ./bin/opencode-free.js benchmark"
+    "check": "node --check src/*.js && node --check bin/opencode-free.js && node --check bin/ocf.js",
+    "probe": "node ./bin/opencode-free.js probe"
   },
   "dependencies": {
     "@opencode/client": "2.2.5",

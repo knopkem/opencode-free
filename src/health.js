@@ -1,8 +1,8 @@
 const MAX_RECENT = 24
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60_000
 
-export function healthFor(state, key) {
-  state.health ||= {}
-  state.health[key] ||= {
+function emptyHealth() {
+  return {
     state: "unknown",
     consecutiveFailures: 0,
     totalSuccesses: 0,
@@ -13,15 +13,46 @@ export function healthFor(state, key) {
     lastSuccessAt: null,
     recent: [],
   }
+}
+
+export function healthFor(state, key) {
+  state.health ||= {}
+  state.health[key] ||= emptyHealth()
   return state.health[key]
+}
+
+export function providerHealthFor(state, providerID) {
+  state.providerHealth ||= {}
+  state.providerHealth[providerID] ||= emptyHealth()
+  return state.providerHealth[providerID]
+}
+
+export function providerIDForKey(key) {
+  const value = String(key || "")
+  const slash = value.indexOf("/")
+  return slash > 0 ? value.slice(0, slash) : value
+}
+
+export function limitScopeFor(key, kind, settings = {}) {
+  if (kind !== "rate_limit" && kind !== "quota") return "model"
+  const providerID = providerIDForKey(key)
+  const configured = settings.limitScopes?.[providerID]
+  return configured === "provider" ? "provider" : "model"
 }
 
 export function classifyError(error = {}) {
   const type = String(error.type || "unknown")
   const message = String(error.message || "")
   const status = Number(error.status || 0)
+  if (
+    type === "provider.free-limit" ||
+    type === "provider.quota" ||
+    type === "provider.budget-limit" ||
+    /quota|usage limit|free limit/i.test(message)
+  ) {
+    return "quota"
+  }
   if (type === "provider.rate-limit" || status === 429) return "rate_limit"
-  if (type === "provider.free-limit" || type === "provider.quota" || type === "provider.budget-limit") return "quota"
   if (type === "provider.auth") return "auth"
   if (type === "provider.timeout" || /(?:timed? ?out|TIMEOUT|stalled for)/i.test(message)) return "timeout"
   if (type === "provider.transport") return "transport"
@@ -32,7 +63,6 @@ export function classifyError(error = {}) {
   if (type === "provider.unsupported-operation") return "unsupported"
   if (type === "provider.no-route") return "no_route"
   if (/rate.?limit|too many requests/i.test(message)) return "rate_limit"
-  if (/quota|usage limit|free limit/i.test(message)) return "quota"
   if (/timed? ?out|timeout/i.test(message)) return "timeout"
   return "unknown"
 }
@@ -40,7 +70,7 @@ export function classifyError(error = {}) {
 export function retryAfterMs(error) {
   const value = Number(error?.retryAfterMs)
   if (!Number.isFinite(value) || value < 0) return undefined
-  return Math.min(value, 15 * 60_000)
+  return Math.min(value, MAX_RETRY_AFTER_MS)
 }
 
 export function failureCooldown(kind, settings, error) {
@@ -58,9 +88,32 @@ export function failureCooldown(kind, settings, error) {
 }
 
 export function recordFailure(state, key, error, settings, now = Date.now()) {
-  const health = healthFor(state, key)
   const kind = classifyError(error)
   const cooldown = failureCooldown(kind, settings, error)
+  const scope = limitScopeFor(key, kind, settings)
+  const providerID = providerIDForKey(key)
+  let health
+  let providerHealth
+  if (scope === "provider") {
+    providerHealth = providerHealthFor(state, providerID)
+    applyFailure(providerHealth, error, kind, cooldown, now)
+    health = providerHealth
+  } else {
+    health = healthFor(state, key)
+    applyFailure(health, error, kind, cooldown, now)
+  }
+  return {
+    health,
+    kind,
+    cooldown,
+    scope,
+    providerID,
+    providerHealth,
+    cooldownUntil: now + cooldown,
+  }
+}
+
+function applyFailure(health, error, kind, cooldown, now) {
   health.state = "cooldown"
   health.consecutiveFailures += 1
   health.totalFailures += 1
@@ -84,15 +137,22 @@ export function recordFailure(state, key, error, settings, now = Date.now()) {
       tps: undefined,
     },
   ].slice(-MAX_RECENT)
-  return { health, kind, cooldown }
 }
 
 export function recordSuccess(state, key, metrics = {}, now = Date.now()) {
   const health = healthFor(state, key)
-  health.state = "healthy"
+  applySuccess(health, metrics, now, false)
+  const providerHealth = providerHealthFor(state, providerIDForKey(key))
+  applySuccess(providerHealth, metrics, now, true)
+  return health
+}
+
+function applySuccess(health, metrics, now, preserveFutureCooldown) {
+  const cooling = preserveFutureCooldown && health.cooldownUntil > now
+  health.state = cooling ? "cooldown" : "healthy"
   health.consecutiveFailures = 0
   health.totalSuccesses += 1
-  health.cooldownUntil = 0
+  if (!cooling) health.cooldownUntil = 0
   health.lastAttemptAt = new Date(now).toISOString()
   health.lastSuccessAt = health.lastAttemptAt
   health.recent = [
@@ -108,7 +168,6 @@ export function recordSuccess(state, key, metrics = {}, now = Date.now()) {
       reasoningTokens: finite(metrics.reasoningTokens),
     },
   ].slice(-MAX_RECENT)
-  return health
 }
 
 function finite(value) {

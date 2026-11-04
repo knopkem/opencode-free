@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import { DEFAULT_SETTINGS, STATE_VERSION } from "./constants.js"
+import { DEFAULT_SETTINGS, ROLES, STATE_VERSION } from "./constants.js"
 
 const LOCK_STALE_MS = 30_000
 const LOCK_TIMEOUT_MS = 5_000
@@ -17,7 +17,7 @@ export function statePaths(env = process.env) {
     home,
     settings: join(home, "settings.json"),
     state: join(home, "state.json"),
-    benchmarks: join(home, "benchmarks.json"),
+    probes: join(home, "probes.json"),
     lock: join(home, "state.lock"),
   }
 }
@@ -32,18 +32,20 @@ export function emptyState() {
       models: [],
     },
     health: {},
+    providerHealth: {},
     routingCounts: {},
+    exploration: {},
     decisions: [],
     lastRoute: null,
   }
 }
 
-export function emptyBenchmarks() {
+export function emptyProbes() {
   return {
     version: 1,
     updatedAt: null,
-    summaries: {},
-    runs: [],
+    catalogFingerprint: null,
+    probes: {},
   }
 }
 
@@ -52,6 +54,9 @@ export function mergeSettings(input = {}, base = DEFAULT_SETTINGS) {
     ...base,
     ...input,
     providers: Array.isArray(input.providers) ? input.providers.map(String) : [...base.providers],
+    excludeProviders: Array.isArray(input.excludeProviders)
+      ? input.excludeProviders.map(String)
+      : [...base.excludeProviders],
     excludeModels: Array.isArray(input.excludeModels)
       ? input.excludeModels.map(String)
       : [...base.excludeModels],
@@ -59,14 +64,56 @@ export function mergeSettings(input = {}, base = DEFAULT_SETTINGS) {
       ...base.pinnedModels,
       ...(input.pinnedModels && typeof input.pinnedModels === "object" ? input.pinnedModels : {}),
     },
+    qualityPriors:
+      input.qualityPriors &&
+      typeof input.qualityPriors === "object" &&
+      !Array.isArray(input.qualityPriors)
+        ? input.qualityPriors
+        : { ...base.qualityPriors },
+    limitScopes: {
+      ...base.limitScopes,
+      ...(input.limitScopes &&
+      typeof input.limitScopes === "object" &&
+      !Array.isArray(input.limitScopes)
+        ? input.limitScopes
+        : {}),
+    },
     speed: { ...base.speed, ...(input.speed && typeof input.speed === "object" ? input.speed : {}) },
+    routing: {
+      ...base.routing,
+      ...(input.routing && typeof input.routing === "object" && !Array.isArray(input.routing)
+        ? input.routing
+        : {}),
+    },
     slow: { ...base.slow, ...(input.slow && typeof input.slow === "object" ? input.slow : {}) },
-    benchmark: {
-      ...base.benchmark,
-      ...(input.benchmark && typeof input.benchmark === "object" ? input.benchmark : {}),
+    probe: {
+      ...base.probe,
+      ...(input.probe && typeof input.probe === "object" ? input.probe : {}),
     },
   }
+  delete merged.benchmark
   if (!["quality", "balanced", "fast"].includes(merged.profile)) merged.profile = "balanced"
+  for (const [providerID, scope] of Object.entries(merged.limitScopes)) {
+    if (scope !== "provider" && scope !== "model") delete merged.limitScopes[providerID]
+  }
+  if (!["auto", true, false].includes(merged.routing.diversity)) merged.routing.diversity = "auto"
+  merged.routing.overlapPenalty = clampNumber(merged.routing.overlapPenalty, 0, 0.25, base.routing.overlapPenalty)
+  merged.routing.maxPrimaryScoreLoss = clampNumber(
+    merged.routing.maxPrimaryScoreLoss,
+    0,
+    0.5,
+    base.routing.maxPrimaryScoreLoss,
+  )
+  merged.routing.maxQualityLoss = clampNumber(
+    merged.routing.maxQualityLoss,
+    0,
+    0.5,
+    base.routing.maxQualityLoss,
+  )
+  merged.routing.exploreUnmapped = normalizeExplorationRates(
+    merged.routing.exploreUnmapped,
+    base.routing.exploreUnmapped,
+  )
   merged.maxFailovers = clampInt(merged.maxFailovers, 0, 10, base.maxFailovers)
   merged.rateLimitCooldownMs = clampInt(
     merged.rateLimitCooldownMs,
@@ -77,53 +124,71 @@ export function mergeSettings(input = {}, base = DEFAULT_SETTINGS) {
   merged.quotaCooldownMs = clampInt(merged.quotaCooldownMs, 1_000, 24 * 60 * 60_000, base.quotaCooldownMs)
   merged.serverCooldownMs = clampInt(merged.serverCooldownMs, 1_000, 24 * 60 * 60_000, base.serverCooldownMs)
   merged.unknownCooldownMs = clampInt(merged.unknownCooldownMs, 1_000, 24 * 60 * 60_000, base.unknownCooldownMs)
-  merged.benchmark.quickTimeoutMs = clampInt(
-    merged.benchmark.quickTimeoutMs,
-    10_000,
+  merged.probe.onAssign = merged.probe.onAssign !== false
+  merged.probe.timeoutMs = clampInt(
+    merged.probe.timeoutMs,
+    5_000,
     15 * 60_000,
-    base.benchmark.quickTimeoutMs,
+    base.probe.timeoutMs,
   )
-  merged.benchmark.fullTimeoutMs = clampInt(
-    merged.benchmark.fullTimeoutMs,
-    10_000,
-    15 * 60_000,
-    base.benchmark.fullTimeoutMs,
-  )
-  merged.benchmark.quickConcurrency = clampInt(
-    merged.benchmark.quickConcurrency,
+  merged.probe.concurrency = clampInt(
+    merged.probe.concurrency,
     1,
     8,
-    base.benchmark.quickConcurrency,
+    base.probe.concurrency,
   )
-  merged.benchmark.fullConcurrency = clampInt(
-    merged.benchmark.fullConcurrency,
+  merged.probe.candidatesPerRole = clampInt(
+    merged.probe.candidatesPerRole,
     1,
-    8,
-    base.benchmark.fullConcurrency,
+    20,
+    base.probe.candidatesPerRole,
   )
-  merged.benchmark.fullRepetitions = clampInt(
-    merged.benchmark.fullRepetitions,
-    1,
-    5,
-    base.benchmark.fullRepetitions,
+  merged.probe.successTtlMs = clampInt(
+    merged.probe.successTtlMs,
+    60_000,
+    7 * 24 * 60 * 60_000,
+    base.probe.successTtlMs,
   )
-  merged.benchmark.cacheTtlMs = clampInt(
-    merged.benchmark.cacheTtlMs,
-    0,
-    30 * 24 * 60 * 60_000,
-    base.benchmark.cacheTtlMs,
+  merged.probe.failureTtlMs = clampInt(
+    merged.probe.failureTtlMs,
+    60_000,
+    7 * 24 * 60 * 60_000,
+    base.probe.failureTtlMs,
   )
-  merged.benchmark.minQuality = Math.max(
-    0,
-    Math.min(1, Number(merged.benchmark.minQuality) || base.benchmark.minQuality),
+  merged.probe.accessFailureTtlMs = clampInt(
+    merged.probe.accessFailureTtlMs,
+    60_000,
+    7 * 24 * 60 * 60_000,
+    base.probe.accessFailureTtlMs,
   )
   return merged
+}
+
+function normalizeExplorationRates(value, fallback) {
+  if (value === undefined || value === null) return { ...fallback }
+  if (typeof value !== "object" && Number.isFinite(Number(value))) {
+    const rate = clampNumber(value, 0, 1, 0)
+    return Object.fromEntries(ROLES.map((role) => [role, rate]))
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ...fallback }
+  return Object.fromEntries(
+    ROLES.map((role) => [
+      role,
+      clampNumber(value[role], 0, 1, fallback[role]),
+    ]),
+  )
 }
 
 function clampInt(value, min, max, fallback) {
   const number = Number(value)
   if (!Number.isFinite(number)) return fallback
   return Math.max(min, Math.min(max, Math.round(number)))
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.max(min, Math.min(max, number))
 }
 
 export async function readJson(path, fallback) {
@@ -158,14 +223,52 @@ export async function saveSettings(settings, env = process.env) {
 export async function loadState(env = process.env) {
   const paths = statePaths(env)
   const state = await readJson(paths.state, emptyState())
-  return {
+  const merged = {
     ...emptyState(),
     ...state,
     catalog: { ...emptyState().catalog, ...(state.catalog || {}) },
     health: state.health || {},
+    providerHealth: state.providerHealth || {},
     routingCounts: state.routingCounts || {},
+    exploration: state.exploration || {},
     decisions: Array.isArray(state.decisions) ? state.decisions : [],
   }
+  return migrateState(merged)
+}
+
+function migrateState(state) {
+  state.exploration ||= {}
+  if (Number(state.version || 0) >= 2) {
+    state.version = STATE_VERSION
+    return state
+  }
+  const providerScoped = new Set(
+    Object.entries(DEFAULT_SETTINGS.limitScopes)
+      .filter(([, scope]) => scope === "provider")
+      .map(([providerID]) => providerID),
+  )
+  for (const [key, health] of Object.entries(state.health || {})) {
+    const providerID = key.split("/")[0]
+    if (!providerScoped.has(providerID)) continue
+    const recent = (health.recent || []).filter(
+      (item) => item.kind !== "rate_limit" && item.kind !== "quota",
+    )
+    health.recent = recent
+    if (health.lastError?.kind === "rate_limit" || health.lastError?.kind === "quota") {
+      health.lastError = null
+      health.cooldownUntil = 0
+    }
+    let consecutive = 0
+    for (let index = recent.length - 1; index >= 0 && !recent[index].ok; index -= 1) {
+      consecutive += 1
+    }
+    health.consecutiveFailures = consecutive
+    if (health.state === "cooldown" && health.cooldownUntil <= Date.now()) {
+      health.state = recent.at(-1)?.ok ? "healthy" : "unknown"
+    }
+  }
+  state.version = STATE_VERSION
+  return state
 }
 
 export async function saveState(state, env = process.env) {
@@ -187,30 +290,29 @@ export async function updateState(mutator, env = process.env) {
   )
 }
 
-export async function loadBenchmarks(env = process.env) {
+export async function loadProbes(env = process.env) {
   const paths = statePaths(env)
-  const data = await readJson(paths.benchmarks, emptyBenchmarks())
+  const data = await readJson(paths.probes, emptyProbes())
   return {
-    ...emptyBenchmarks(),
+    ...emptyProbes(),
     ...data,
-    summaries: data.summaries || {},
-    runs: Array.isArray(data.runs) ? data.runs : [],
+    probes: data.probes || {},
   }
 }
 
-export async function saveBenchmarks(data, env = process.env) {
+export async function saveProbes(data, env = process.env) {
   const paths = statePaths(env)
   const next = { ...data, version: 1, updatedAt: new Date().toISOString() }
-  await writeJson(paths.benchmarks, next)
+  await writeJson(paths.probes, next)
   return next
 }
 
-export async function updateBenchmarks(mutator, env = process.env) {
+export async function updateProbes(mutator, env = process.env) {
   return withLock(
     async () => {
-      const data = await loadBenchmarks(env)
+      const data = await loadProbes(env)
       const next = (await mutator(data)) || data
-      return saveBenchmarks(next, env)
+      return saveProbes(next, env)
     },
     env,
     statePaths(env).lock,

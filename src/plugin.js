@@ -1,19 +1,17 @@
 import { Plugin } from "@opencode/plugin"
-import {
-  BENCHMARK_METADATA_KEY,
-  FORBIDDEN_AGENTS,
-} from "./constants.js"
-import { catalogFromModels, modelKey } from "./catalog.js"
+import { FORBIDDEN_AGENTS } from "./constants.js"
+import { baseKey, catalogFromModels, modelKey } from "./catalog.js"
 import { classifyError, recordFailure, recordSuccess } from "./health.js"
 import {
-  chooseModel,
+  chooseRoutes,
   isFreeSelectedModel,
   retryCandidates,
   roleForAgent,
+  selectExplorationCandidate,
 } from "./router.js"
 import {
   appendDecision,
-  loadBenchmarks,
+  loadProbes,
   loadSettings,
   loadState,
   updateState,
@@ -38,12 +36,46 @@ export const OpenCodeFreePlugin = Plugin.define({
   id: "opencode-free",
   async setup(ctx) {
     const managed = new Set()
+    const manualSelections = new Set()
+    const authorizedModels = new Map()
     const attempts = new Map()
     const prompts = new Map()
     const requests = new Map()
+    const explorationChoices = new Map()
     const catalogCache = { at: 0, value: undefined }
     let disposed = false
     const abort = new AbortController()
+
+    const clearSessionRouting = (sessionID) => {
+      managed.delete(sessionID)
+      authorizedModels.delete(sessionID)
+      attempts.delete(sessionID)
+      prompts.delete(sessionID)
+      explorationChoices.delete(sessionID)
+    }
+
+    const markManualSelection = (sessionID) => {
+      manualSelections.add(sessionID)
+      clearSessionRouting(sessionID)
+    }
+
+    const switchModel = async (sessionID, candidate) => {
+      const key = modelKey(candidate)
+      authorizedModels.set(sessionID, key)
+      try {
+        await ctx.session.switchModel({
+          sessionID,
+          model: {
+            providerID: candidate.providerID,
+            id: candidate.id,
+            ...(candidate.variant ? { variant: candidate.variant } : {}),
+          },
+        })
+      } catch (error) {
+        if (authorizedModels.get(sessionID) === key) authorizedModels.delete(sessionID)
+        throw error
+      }
+    }
 
     const refreshCatalog = async (settings, force = false) => {
       if (!force && catalogCache.value && Date.now() - catalogCache.at < 60_000) return catalogCache.value
@@ -53,9 +85,6 @@ export const OpenCodeFreePlugin = Plugin.define({
       catalogCache.value = catalog
       return catalog
     }
-
-    const benchmarkSession = (event, session) =>
-      Boolean(event?.metadata?.[BENCHMARK_METADATA_KEY] || session?.metadata?.[BENCHMARK_METADATA_KEY])
 
     const rememberDecision = async (decision) => {
       await updateState((state) => {
@@ -67,6 +96,10 @@ export const OpenCodeFreePlugin = Plugin.define({
           state.routingCounts ||= {}
           state.routingCounts[decision.candidate.key] =
             Number(state.routingCounts[decision.candidate.key] || 0) + 1
+          if (decision.reason === "explore_unmapped") {
+            state.exploration ||= {}
+            state.exploration[decision.candidate.key] = new Date().toISOString()
+          }
         }
         return state
       }).catch((error) => {
@@ -85,31 +118,61 @@ export const OpenCodeFreePlugin = Plugin.define({
     }
 
     await ctx.session.hook("prompt", async (event) => {
-      if (disposed || benchmarkSession(event)) return
+      if (disposed || manualSelections.has(event.sessionID)) return
       try {
         const settings = await loadSettings()
         if (!settings.auto) return
         const session = await ctx.session.get({ sessionID: event.sessionID })
         if (!session || FORBIDDEN_AGENTS.has(String(session.agent || ""))) return
+        const authorized = authorizedModels.get(event.sessionID)
+        const selected = session.model ? modelKey(session.model) : undefined
+        if (authorized && selected && authorized !== selected) {
+          markManualSelection(event.sessionID)
+          return
+        }
         const catalog = await refreshCatalog(settings)
         if (!catalog.models.length) return
         if (session.model && !isFreeSelectedModel(session.model, catalog)) {
-          managed.delete(event.sessionID)
-          attempts.delete(event.sessionID)
-          prompts.delete(event.sessionID)
+          markManualSelection(event.sessionID)
           return
         }
         const role = roleForAgent(session.agent)
-        const [state, benchmarks] = await Promise.all([loadState(), loadBenchmarks()])
-        const result = chooseModel({
+        const [state, probes] = await Promise.all([loadState(), loadProbes()])
+        const remembered = explorationChoices.get(event.sessionID)
+        let forcedKey = remembered?.role === role ? remembered.key : undefined
+        if (
+          forcedKey &&
+          !catalog.models.some((model) => baseKey(model) === forcedKey.replace(/#.*$/, ""))
+        ) {
+          explorationChoices.delete(event.sessionID)
+          forcedKey = undefined
+        }
+        if (
+          !forcedKey &&
+          !remembered &&
+          !managed.has(event.sessionID) &&
+          !authorizedModels.has(event.sessionID)
+        ) {
+          forcedKey = selectExplorationCandidate({
+            catalog,
+            state,
+            settings,
+            role,
+            prompt: event.prompt,
+          })
+        }
+        const forcedKeys = forcedKey ? { [role]: forcedKey } : {}
+        const routed = chooseRoutes({
           catalog,
           state,
-          benchmarks,
+          probes,
           settings,
           role,
           prompt: event.prompt,
           current: session.model,
+          forcedKeys,
         })
+        const result = routed.roles[role]
         if (!result.candidate) {
           await rememberDecision({
             type: "prompt",
@@ -123,22 +186,24 @@ export const OpenCodeFreePlugin = Plugin.define({
         }
         managed.add(event.sessionID)
         prompts.set(event.sessionID, event.prompt)
+        if (result.decision.reason === "explore_unmapped") {
+          explorationChoices.set(event.sessionID, {
+            role,
+            key: modelKey(result.candidate),
+          })
+        } else if (forcedKey) {
+          explorationChoices.delete(event.sessionID)
+        }
         attempts.set(event.sessionID, {
           keys: [modelKey(result.candidate)],
           lastAttempt: 0,
         })
         if (session.model && modelKey(session.model) === modelKey(result.candidate)) {
+          authorizedModels.set(event.sessionID, modelKey(result.candidate))
           await persistCatalog(catalog)
           return
         }
-        await ctx.session.switchModel({
-          sessionID: event.sessionID,
-          model: {
-            providerID: result.candidate.providerID,
-            id: result.candidate.id,
-            ...(result.candidate.variant ? { variant: result.candidate.variant } : {}),
-          },
-        })
+        await switchModel(event.sessionID, result.candidate)
         await persistCatalog(catalog)
         await rememberDecision({
           type: "prompt",
@@ -184,14 +249,17 @@ export const OpenCodeFreePlugin = Plugin.define({
           failure = recordFailure(draft, currentKey, event.error, settings)
           return draft
         })
-        const benchmarks = await loadBenchmarks()
+        const probes = await loadProbes()
+        if (explorationChoices.get(event.sessionID)?.key === currentKey) {
+          explorationChoices.delete(event.sessionID)
+        }
         const exhausted = attempt.keys.length > settings.maxFailovers
         const result = exhausted
           ? { candidate: undefined, decision: { reason: "failover_limit" } }
           : retryCandidates({
               catalog,
               state,
-              benchmarks,
+              probes,
               settings,
               role,
               prompt: prompts.get(event.sessionID),
@@ -207,22 +275,23 @@ export const OpenCodeFreePlugin = Plugin.define({
             role,
             failed: currentKey,
             failureKind: failure?.kind || kind,
+            failureScope: failure?.scope,
+            providerID: failure?.providerID,
             reason: result.decision?.reason || "exhausted",
-            cooldownUntil: failure?.cooldown ? new Date(failure.cooldown).toISOString() : undefined,
+            cooldownUntil: failure?.cooldownUntil
+              ? new Date(failure.cooldownUntil).toISOString()
+              : undefined,
+            providerCooldownUntil:
+              failure?.scope === "provider" && failure?.cooldownUntil
+                ? new Date(failure.cooldownUntil).toISOString()
+                : undefined,
             decision: result.decision,
           })
           return
         }
 
         attempt.keys.push(modelKey(result.candidate))
-        await ctx.session.switchModel({
-          sessionID: event.sessionID,
-          model: {
-            providerID: result.candidate.providerID,
-            id: result.candidate.id,
-            ...(result.candidate.variant ? { variant: result.candidate.variant } : {}),
-          },
-        })
+        await switchModel(event.sessionID, result.candidate)
         event.decision = { retry: true, delay: 50 }
         await rememberDecision({
           type: "retry",
@@ -231,6 +300,8 @@ export const OpenCodeFreePlugin = Plugin.define({
           role,
           failed: currentKey,
           failureKind: failure?.kind || kind,
+          failureScope: failure?.scope,
+          providerID: failure?.providerID,
           candidate: result.candidate,
           reason: "failover",
           decision: result.decision,
@@ -341,9 +412,11 @@ export const OpenCodeFreePlugin = Plugin.define({
             if (event.type === "session.execution.succeeded" || event.type === "session.idle") {
               attempts.delete(sessionID)
             }
-            if (
+            if (event.type === "session.deleted") {
+              manualSelections.delete(sessionID)
+              clearSessionRouting(sessionID)
+            } else if (
               event.type === "session.idle" ||
-              event.type === "session.deleted" ||
               event.type === "session.execution.failed" ||
               event.type === "session.execution.interrupted"
             ) {
@@ -352,13 +425,10 @@ export const OpenCodeFreePlugin = Plugin.define({
             }
             continue
           }
-          if (event.type === "session.model.selected") {
-            if (managed.has(sessionID) && data.model && catalogCache.value) {
-              if (!isFreeSelectedModel(data.model, catalogCache.value)) {
-                managed.delete(sessionID)
-                attempts.delete(sessionID)
-                prompts.delete(sessionID)
-              }
+          if (event.type === "session.model.selected" && data.model) {
+            const selected = modelKey(data.model)
+            if (authorizedModels.get(sessionID) !== selected) {
+              markManualSelection(sessionID)
             }
           }
         }

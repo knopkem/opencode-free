@@ -51,6 +51,7 @@ test("detects free models by cost, not name", () => {
 })
 
 test("catalog filters paid, disabled, deprecated, non-tool, and non-chat models", () => {
+  const restricted = mergeSettings({ providers: ["opencode"] })
   const catalog = catalogFromModels(
     [
       model({ id: "free" }),
@@ -61,12 +62,69 @@ test("catalog filters paid, disabled, deprecated, non-tool, and non-chat models"
       model({ id: "image", type: "image" }),
       model({ id: "other-provider", providerID: "openrouter" }),
     ],
-    settings,
+    restricted,
   )
   assert.deepEqual(
     catalog.models.map((item) => item.id),
     ["free"],
   )
+})
+
+test("discovers free models from every connected provider by default", () => {
+  const catalog = catalogFromModels(
+    [
+      model({ id: "open-free" }),
+      model({ id: "router-free", providerID: "openrouter" }),
+      model({ id: "gateway-free", providerID: "some-gateway" }),
+      model({
+        id: "router-paid",
+        providerID: "openrouter",
+        cost: [{ input: 1, output: 2, cache: { read: 0, write: 0 } }],
+      }),
+    ],
+    settings,
+  )
+  assert.deepEqual(
+    catalog.models.map((item) => `${item.providerID}/${item.id}`),
+    ["opencode/open-free", "openrouter/router-free", "some-gateway/gateway-free"],
+  )
+})
+
+test("an explicit provider list remains an allowlist", () => {
+  const restricted = mergeSettings({ providers: ["openrouter"] })
+  const catalog = catalogFromModels(
+    [
+      model({ id: "open-free" }),
+      model({ id: "router-free", providerID: "openrouter" }),
+      model({ id: "gateway-free", providerID: "some-gateway" }),
+    ],
+    restricted,
+  )
+  assert.deepEqual(
+    catalog.models.map((item) => `${item.providerID}/${item.id}`),
+    ["openrouter/router-free"],
+  )
+})
+
+test("excludeProviders filters wildcard discovery and explicit allowlists", () => {
+  const inputs = [
+    model({ id: "open-free" }),
+    model({ id: "router-free", providerID: "openrouter" }),
+    model({ id: "gateway-free", providerID: "some-gateway" }),
+  ]
+  const wildcard = catalogFromModels(
+    inputs,
+    mergeSettings({ excludeProviders: ["openrouter", "some-gateway"] }),
+  )
+  assert.deepEqual(
+    wildcard.models.map((item) => `${item.providerID}/${item.id}`),
+    ["opencode/open-free"],
+  )
+  const allowlisted = catalogFromModels(
+    inputs,
+    mergeSettings({ providers: ["openrouter"], excludeProviders: ["openrouter"] }),
+  )
+  assert.deepEqual(allowlisted.models, [])
 })
 
 test("variant selection follows role and profile preferences", () => {

@@ -1,5 +1,5 @@
-export const STATE_VERSION = 1
-export const BENCHMARK_VERSION = 2
+export const STATE_VERSION = 3
+export const PROBE_VERSION = 1
 
 export const ROLES = ["plan", "build", "verify", "fast"]
 export const PRIMARY_ROLES = new Set(["plan", "build"])
@@ -7,9 +7,14 @@ export const PRIMARY_ROLES = new Set(["plan", "build"])
 export const DEFAULT_SETTINGS = Object.freeze({
   auto: true,
   profile: "balanced",
-  providers: ["opencode"],
+  providers: ["*"],
+  excludeProviders: [],
   excludeModels: [],
   pinnedModels: {},
+  qualityPriors: {},
+  limitScopes: {
+    opencode: "provider",
+  },
   maxFailovers: 3,
   rateLimitCooldownMs: 60_000,
   quotaCooldownMs: 30 * 60_000,
@@ -19,18 +24,30 @@ export const DEFAULT_SETTINGS = Object.freeze({
     targetTtftMs: 8_000,
     targetTps: 40,
   },
+  routing: {
+    diversity: "auto",
+    overlapPenalty: 0.04,
+    maxPrimaryScoreLoss: 0.04,
+    maxQualityLoss: 0.03,
+    exploreUnmapped: {
+      plan: 0.02,
+      build: 0.02,
+      verify: 0.02,
+      fast: 0.05,
+    },
+  },
   slow: {
     firstChunkMs: 90_000,
     idleChunkMs: 90_000,
   },
-  benchmark: {
-    quickTimeoutMs: 60_000,
-    fullTimeoutMs: 180_000,
-    quickConcurrency: 3,
-    fullConcurrency: 1,
-    fullRepetitions: 2,
-    cacheTtlMs: 24 * 60 * 60_000,
-    minQuality: 0.2,
+  probe: {
+    onAssign: true,
+    timeoutMs: 10_000,
+    concurrency: 2,
+    candidatesPerRole: 4,
+    successTtlMs: 60 * 60_000,
+    failureTtlMs: 10 * 60_000,
+    accessFailureTtlMs: 6 * 60 * 60_000,
   },
 })
 
@@ -78,13 +95,10 @@ export const VARIANT_PREFERENCES = Object.freeze({
   },
 })
 
-export const BENCHMARK_METADATA_KEY = "opencodeFreeBenchmark"
-
 export const FORBIDDEN_AGENTS = new Set([
   "title",
   "summary",
   "compaction",
-  "opencode-free-benchmark",
 ])
 
 export const RELAY_ROLE_MAP = Object.freeze({

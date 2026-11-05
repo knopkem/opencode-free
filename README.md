@@ -3,9 +3,8 @@
 Automatic model selection, health tracking, and failover for OpenCode's free
 models.
 
-[![npm](https://img.shields.io/npm/v/@knopkem/opencode-free.svg)](https://www.npmjs.com/package/@knopkem/opencode-free)
-[![license](https://img.shields.io/npm/l/@knopkem/opencode-free.svg)](LICENSE)
-[![node](https://img.shields.io/node/v/@knopkem/opencode-free.svg)](package.json)
+Published on npm as
+[`@knopkem/opencode-free`](https://www.npmjs.com/package/@knopkem/opencode-free).
 
 `opencode-free` discovers zero-cost models from the model catalog, ranks them
 using public benchmark priors plus live reliability and speed, and assigns the

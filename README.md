@@ -1,4 +1,4 @@
-# ocf
+# ocf - Opencode Free
 
 Automatic routing and failover for OpenCode's free models.
 

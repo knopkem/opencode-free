@@ -1,7 +1,7 @@
 {
-  "name": "opencode-free",
+  "name": "@knopkem/opencode-free",
   "version": "0.1.0",
-  "description": "Automatic routing, failover, and benchmarking for OpenCode free models",
+  "description": "Automatic routing, failover, and health tracking for OpenCode free models",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -29,5 +29,28 @@
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/knopkem/opencode-free.git"
+  },
+  "homepage": "https://github.com/knopkem/opencode-free#readme",
+  "bugs": {
+    "url": "https://github.com/knopkem/opencode-free/issues"
+  },
+  "author": {
+    "name": "Michael Knopke",
+    "email": "knopkem@gmail.com"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "llm",
+    "free-models",
+    "model-router",
+    "failover"
+  ]
 }

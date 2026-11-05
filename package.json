@@ -1,6 +1,6 @@
 {
   "name": "@knopkem/opencode-free",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Automatic routing, failover, and health tracking for OpenCode free models",
   "type": "module",
   "license": "MIT",
